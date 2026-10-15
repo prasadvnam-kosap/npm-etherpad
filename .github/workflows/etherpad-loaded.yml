@@ -1,0 +1,78 @@
+# LOADED capture, item 10 Node gate — etherpad.
+#
+# Mirrors the repo's own CI (.github/workflows/backend-tests.yml (Linux without plugins)) for install and test; adds only NODE_V8_COVERAGE (per-function call
+# counts for every script V8 compiled, one file per process) and the depproof SBOM. No require-hook shim:
+# V8 coverage is the only input the item 10 gate reads.
+
+name: LOADED capture — etherpad
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit or branch to measure. Defaults to the corpus pin.
+        required: false
+        default: 'depproof-pinned'
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest        # declared by the repo's own CI
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install libreoffice
+        run: sudo apt-get update && sudo apt-get install -y libreoffice libreoffice-pdfimport
+      - run: pnpm i --frozen-lockfile
+      - working-directory: admin
+        run: pnpm install
+      - working-directory: admin
+        run: pnpm build
+      # The backend mocha suite only. The repo's separate vitest step is left out: vitest resolves through
+      # Vite's module graph, which this capture cannot see reliably (the axios cell's lesson).
+      - name: Test with V8 coverage
+        env:
+          NODE_V8_COVERAGE: ${{ github.workspace }}/v8-coverage
+        run: |
+          mkdir -p v8-coverage
+          pnpm test || echo "suite exited $? — a partial suite still yields a valid trace"
+
+      - name: Canary — coverage and results exist
+        if: always()
+        run: |
+          cov=$(ls v8-coverage/coverage-*.json 2>/dev/null | wc -l)
+          echo "v8 coverage files: $cov"
+          if [ "$cov" -lt 1 ]; then
+            echo "::error::NODE_V8_COVERAGE produced nothing. Do not read a number off this run."
+            exit 1
+          fi
+
+      - name: Resolved set — depproof SBOM
+        if: always()
+        run: |
+          mkdir -p sbom
+          docker run --rm -v "$PWD:/w" -w /w ghcr.io/depproof/depproof:v1 \
+            scan --discover --output-dir sbom || true
+          ls -la sbom/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loaded-etherpad
+          path: |
+            v8-coverage/
+            sbom/
+            pnpm-lock.yaml
+          retention-days: 14
